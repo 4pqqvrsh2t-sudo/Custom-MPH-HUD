@@ -1,0 +1,49 @@
+name: Build browser firmware
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "firmware/**"
+      - "platformio.ini"
+      - ".github/workflows/build-firmware.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade platformio
+
+      - name: Build merged ESP32 firmware
+        run: pio run -t merged-bin
+
+      - name: Copy browser-flash binary
+        run: |
+          mkdir -p webflash
+          cp .pio/build/esp32dev/firmware-merged.bin webflash/firmware.bin
+
+      - name: Commit compiled firmware
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add webflash/firmware.bin
+          if git diff --cached --quiet; then
+            echo "Firmware binary is already current."
+          else
+            git commit -m "Build browser firmware [skip ci]"
+            git push
+          fi
