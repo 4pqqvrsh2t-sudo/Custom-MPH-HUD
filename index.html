@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#05070a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Custom MPH HUD</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">PHONE → ESP32</div>
+    <h1>Custom MPH HUD</h1>
+
+    <section class="speed-card">
+      <div id="speed" class="speed">--</div>
+      <div class="mph">MPH</div>
+      <div id="accuracy" class="accuracy">GPS off</div>
+    </section>
+
+    <div class="controls">
+      <button id="connectBtn">Connect HUD</button>
+      <button id="gpsBtn" class="primary">Start GPS</button>
+    </div>
+
+    <section class="status">
+      <div><span>HUD</span><strong id="bleStatus">OFF</strong></div>
+      <div><span>GPS</span><strong id="gpsStatus">OFF</strong></div>
+      <div><span>TX</span><strong id="txStatus">—</strong></div>
+    </section>
+
+    <p class="note">Current speed comes from the phone GPS. Keep this page open while testing.</p>
+  </main>
+</body>
+</html>
