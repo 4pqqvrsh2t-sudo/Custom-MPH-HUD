@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#05070a">
+  <title>Install Custom MPH HUD</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <style>
+    .flash-card{border:1px solid #252d36;border-radius:24px;padding:24px;background:#090d12;margin-top:18px}
+    .flash-card p{color:#8f9aa5;line-height:1.5}
+    esp-web-install-button{--esp-tools-button-color:#edf2f5;--esp-tools-button-text-color:#080b0f;--esp-tools-button-border-radius:14px}
+    .back{display:inline-block;margin-top:18px;color:#b9c4cf;text-decoration:none}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">NO ARDUINO IDE REQUIRED</div>
+    <h1>Install Custom MPH HUD</h1>
+
+    <section class="flash-card">
+      <p>Plug the ESP32 into this computer with a USB data cable, then press Install. The firmware is compiled in GitHub's cloud, not on your computer.</p>
+
+      <esp-web-install-button manifest="webflash/manifest.json">
+        <button slot="activate" class="primary">Install on ESP32</button>
+        <span slot="unsupported">Use Chrome or Edge on a computer that supports Web Serial. This installer does not work from iPhone Safari.</span>
+        <span slot="not-allowed">The installer must be opened from the HTTPS GitHub Pages site.</span>
+      </esp-web-install-button>
+
+      <p>The installer will ask which serial device to use. Your pictured ESP32 uses a CP2102 USB-to-serial chip, so the port may appear with “CP210x” or “Silicon Labs” in its name.</p>
+    </section>
+
+    <a class="back" href="./">← Back to phone speed page</a>
+  </main>
+</body>
+</html>
