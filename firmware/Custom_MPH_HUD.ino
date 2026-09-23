@@ -6,15 +6,17 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 
+// -----------------------------
+// Hardware
+// -----------------------------
 #define TFT_SCLK 18
 #define TFT_MOSI 23
 #define TFT_CS   5
 #define TFT_DC   16
 #define TFT_RST  17
 
-#define LEFT_TURN_PIN  32
-#define RIGHT_TURN_PIN 33
-
+#define LEFT_TURN_PIN   32
+#define RIGHT_TURN_PIN  33
 #define LIGHT_SENSOR_PIN 34
 #define BACKLIGHT_PWM_PIN 25
 
@@ -22,47 +24,154 @@
 #define DATA_TIMEOUT_MS 4000
 #define HUD_MIRROR true
 
-// Starting calibration values for the LDR divider.
-// Adjust these after looking at real analogRead() values in darkness and daylight.
+// Starting values only. Calibrate after the LDR is physically installed.
 #define LIGHT_DARK_RAW   250
 #define LIGHT_BRIGHT_RAW 3500
 
-// 0-255 range. Keep a little brightness at night so the HUD remains readable.
-#define MIN_VISUAL_BRIGHTNESS 28
-#define MAX_VISUAL_BRIGHTNESS 255
+#define MIN_BRIGHTNESS 24
+#define MAX_BRIGHTNESS 255
 
-// GPIO 25 is intended to drive a transistor/MOSFET backlight-control circuit.
-// Leave false until that driver is physically installed.
+// Leave false until GPIO 25 drives a proper transistor/MOSFET
+// connected to the TFT backlight circuit.
 #define ENABLE_BACKLIGHT_PWM false
 
-static const char* SERVICE_UUID="c6f51001-46bb-4bb5-a8dd-000000000001";
-static const char* SPEED_UUID  ="c6f51002-46bb-4bb5-a8dd-000000000001";
+// -----------------------------
+// BLE
+// -----------------------------
+static const char* SERVICE_UUID =
+  "c6f51001-46bb-4bb5-a8dd-000000000001";
 
-Adafruit_ST7789 tft(TFT_CS,TFT_DC,TFT_RST);
+static const char* DATA_UUID =
+  "c6f51002-46bb-4bb5-a8dd-000000000001";
 
-volatile float incomingMph=0.0f;
-volatile uint32_t lastPacketMs=0;
-portMUX_TYPE speedMux=portMUX_INITIALIZER_UNLOCKED;
+// Phone packet:
+// currentSpeedMph,speedLimitMph
+//
+// Example:
+// 47.2,45
+//
+// Use -1 for speedLimitMph when unknown.
 
-float filteredLight=0;
-uint8_t visualBrightness=180;
+Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 
-int lastSpeed=-999;
-bool lastTimedOut=true;
-bool lastLeft=false;
-bool lastRight=false;
+volatile float currentSpeedMph = 0.0f;
+volatile int currentLimitMph = -1;
+volatile uint32_t lastPacketMs = 0;
 
-enum Segment:uint8_t{
-  SEG_A=1<<0,
-  SEG_B=1<<1,
-  SEG_C=1<<2,
-  SEG_D=1<<3,
-  SEG_E=1<<4,
-  SEG_F=1<<5,
-  SEG_G=1<<6
+portMUX_TYPE dataMux = portMUX_INITIALIZER_UNLOCKED;
+
+// -----------------------------
+// Color system
+// -----------------------------
+struct RGB {
+  float r;
+  float g;
+  float b;
 };
 
-const uint8_t DIGITS[10]={
+const RGB RED    = {255,  0,   0};
+const RGB ORANGE = {255, 132,  0};
+const RGB BLUE   = {  0, 135,255};
+const RGB PURPLE = {170,  0, 255};
+const RGB WHITE  = {255,255, 255};
+
+RGB shownColor = WHITE;
+
+RGB mixColor(const RGB& a, const RGB& b, float t) {
+  t = constrain(t, 0.0f, 1.0f);
+
+  return {
+    a.r + (b.r - a.r) * t,
+    a.g + (b.g - a.g) * t,
+    a.b + (b.b - a.b) * t
+  };
+}
+
+RGB targetColor(float speed, int limit) {
+  if (limit <= 0) return WHITE;
+
+  const float diff = speed - limit;
+
+  if (diff >= 10.0f) return RED;
+
+  if (diff > 5.0f) {
+    return mixColor(ORANGE, RED, (diff - 5.0f) / 5.0f);
+  }
+
+  if (diff > -5.0f) return ORANGE;
+
+  if (diff > -10.0f) {
+    return mixColor(BLUE, PURPLE, (-diff - 5.0f) / 5.0f);
+  }
+
+  return PURPLE;
+}
+
+// -----------------------------
+// Ambient brightness
+// -----------------------------
+float filteredLight = 0.0f;
+uint8_t visualBrightness = 180;
+
+uint8_t dimChannel(float value) {
+  value = constrain(value, 0.0f, 255.0f);
+  return (uint16_t)value * visualBrightness / 255;
+}
+
+uint16_t hudColor(const RGB& color) {
+  return tft.color565(
+    dimChannel(color.r),
+    dimChannel(color.g),
+    dimChannel(color.b)
+  );
+}
+
+void updateBrightness() {
+  static uint32_t lastRead = 0;
+
+  if (millis() - lastRead < 80) return;
+  lastRead = millis();
+
+  const int raw = analogRead(LIGHT_SENSOR_PIN);
+
+  if (filteredLight == 0.0f) filteredLight = raw;
+
+  filteredLight =
+    filteredLight * 0.88f +
+    raw * 0.12f;
+
+  float level =
+    (filteredLight - LIGHT_DARK_RAW) /
+    (float)(LIGHT_BRIGHT_RAW - LIGHT_DARK_RAW);
+
+  level = constrain(level, 0.0f, 1.0f);
+
+  // Keeps night output subdued while still allowing full daylight brightness.
+  level *= level;
+
+  visualBrightness =
+    MIN_BRIGHTNESS +
+    level * (MAX_BRIGHTNESS - MIN_BRIGHTNESS);
+
+  if (ENABLE_BACKLIGHT_PWM) {
+    analogWrite(BACKLIGHT_PWM_PIN, visualBrightness);
+  }
+}
+
+// -----------------------------
+// Large mirrored digits
+// -----------------------------
+enum Segment : uint8_t {
+  SEG_A = 1 << 0,
+  SEG_B = 1 << 1,
+  SEG_C = 1 << 2,
+  SEG_D = 1 << 3,
+  SEG_E = 1 << 4,
+  SEG_F = 1 << 5,
+  SEG_G = 1 << 6
+};
+
+const uint8_t DIGITS[10] = {
   SEG_A|SEG_B|SEG_C|SEG_D|SEG_E|SEG_F,
   SEG_B|SEG_C,
   SEG_A|SEG_B|SEG_G|SEG_E|SEG_D,
@@ -75,260 +184,347 @@ const uint8_t DIGITS[10]={
   SEG_A|SEG_B|SEG_C|SEG_D|SEG_F|SEG_G
 };
 
-uint8_t scale8(uint8_t value){
-  return (uint16_t)value*visualBrightness/255;
-}
+uint8_t mirrorSegments(uint8_t s) {
+  uint8_t out = 0;
 
-uint16_t dimmedColor(uint8_t r,uint8_t g,uint8_t b){
-  return tft.color565(scale8(r),scale8(g),scale8(b));
-}
+  if (s & SEG_A) out |= SEG_A;
+  if (s & SEG_D) out |= SEG_D;
+  if (s & SEG_G) out |= SEG_G;
 
-uint8_t mirroredSegments(uint8_t s){
-  uint8_t out=0;
-
-  if(s&SEG_A)out|=SEG_A;
-  if(s&SEG_D)out|=SEG_D;
-  if(s&SEG_G)out|=SEG_G;
-
-  if(s&SEG_B)out|=SEG_F;
-  if(s&SEG_F)out|=SEG_B;
-  if(s&SEG_C)out|=SEG_E;
-  if(s&SEG_E)out|=SEG_C;
+  if (s & SEG_B) out |= SEG_F;
+  if (s & SEG_F) out |= SEG_B;
+  if (s & SEG_C) out |= SEG_E;
+  if (s & SEG_E) out |= SEG_C;
 
   return out;
 }
 
-void drawDigit(int x,int y,int w,int h,int thick,int digit,uint16_t color,bool mirror){
-  if(digit<0||digit>9)return;
+void drawDigit(
+  int x,
+  int y,
+  int w,
+  int h,
+  int thick,
+  int digit,
+  uint16_t color,
+  bool mirrored
+) {
+  if (digit < 0 || digit > 9) return;
 
-  uint8_t s=DIGITS[digit];
-  if(mirror)s=mirroredSegments(s);
+  uint8_t s = DIGITS[digit];
 
-  const int half=h/2;
+  if (mirrored) {
+    s = mirrorSegments(s);
+  }
 
-  if(s&SEG_A)tft.fillRoundRect(x+thick,y,w-2*thick,thick,thick/2,color);
-  if(s&SEG_G)tft.fillRoundRect(x+thick,y+half-thick/2,w-2*thick,thick,thick/2,color);
-  if(s&SEG_D)tft.fillRoundRect(x+thick,y+h-thick,w-2*thick,thick,thick/2,color);
+  const int half = h / 2;
 
-  if(s&SEG_F)tft.fillRoundRect(x,y+thick,thick,half-thick,thick/2,color);
-  if(s&SEG_B)tft.fillRoundRect(x+w-thick,y+thick,thick,half-thick,thick/2,color);
-  if(s&SEG_E)tft.fillRoundRect(x,y+half,thick,half-thick,thick/2,color);
-  if(s&SEG_C)tft.fillRoundRect(x+w-thick,y+half,thick,half-thick,thick/2,color);
+  if (s & SEG_A)
+    tft.fillRoundRect(x + thick, y, w - 2*thick, thick, thick/2, color);
+
+  if (s & SEG_G)
+    tft.fillRoundRect(x + thick, y + half - thick/2, w - 2*thick, thick, thick/2, color);
+
+  if (s & SEG_D)
+    tft.fillRoundRect(x + thick, y + h - thick, w - 2*thick, thick, thick/2, color);
+
+  if (s & SEG_F)
+    tft.fillRoundRect(x, y + thick, thick, half - thick, thick/2, color);
+
+  if (s & SEG_B)
+    tft.fillRoundRect(x + w - thick, y + thick, thick, half - thick, thick/2, color);
+
+  if (s & SEG_E)
+    tft.fillRoundRect(x, y + half, thick, half - thick, thick/2, color);
+
+  if (s & SEG_C)
+    tft.fillRoundRect(x + w - thick, y + half, thick, half - thick, thick/2, color);
 }
 
-void clearCenter(){
-  tft.fillRect(EDGE_WIDTH,0,tft.width()-EDGE_WIDTH*2,tft.height(),ST77XX_BLACK);
+void clearNumberArea() {
+  tft.fillRect(
+    EDGE_WIDTH,
+    0,
+    tft.width() - EDGE_WIDTH * 2,
+    tft.height(),
+    ST77XX_BLACK
+  );
 }
 
-void drawDisconnected(){
-  clearCenter();
+void drawSpeed(int mph, uint16_t color) {
+  mph = constrain(mph, 0, 180);
 
-  const int y=tft.height()/2-5;
-  const int dashW=54;
-  const int gap=18;
-  const int startX=(tft.width()-(dashW*2+gap))/2;
-  const uint16_t gray=dimmedColor(95,95,95);
+  String value = String(mph);
 
-  tft.fillRoundRect(startX,y,dashW,10,4,gray);
-  tft.fillRoundRect(startX+dashW+gap,y,dashW,10,4,gray);
+  const int count = value.length();
+  const int digitW = count == 3 ? 72 : 86;
+  const int digitH = 166;
+  const int thick = 14;
+  const int gap = 10;
 
-  lastSpeed=-999;
-}
+  const int totalW =
+    count * digitW +
+    (count - 1) * gap;
 
-void drawSpeed(int mph){
-  mph=constrain(mph,0,180);
+  const int startX =
+    (tft.width() - totalW) / 2;
 
-  String s=String(mph);
+  const int y =
+    (tft.height() - digitH) / 2;
 
-  const int count=s.length();
-  const int digitW=count==3?72:84;
-  const int digitH=158;
-  const int thick=13;
-  const int gap=10;
+  for (int i = 0; i < count; i++) {
+    const int sourceIndex =
+      HUD_MIRROR
+      ? count - 1 - i
+      : i;
 
-  const int totalW=count*digitW+(count-1)*gap;
-  const int startX=(tft.width()-totalW)/2;
-  const int y=(tft.height()-digitH)/2;
-
-  const uint16_t white=dimmedColor(255,255,255);
-
-  for(int i=0;i<count;i++){
-    const int sourceIndex=HUD_MIRROR?(count-1-i):i;
-    const int digit=s[sourceIndex]-'0';
+    const int digit =
+      value[sourceIndex] - '0';
 
     drawDigit(
-      startX+i*(digitW+gap),
+      startX + i * (digitW + gap),
       y,
       digitW,
       digitH,
       thick,
       digit,
-      white,
+      color,
       HUD_MIRROR
     );
   }
 }
 
-void updateAmbientBrightness(){
-  static uint32_t lastRead=0;
-  const uint32_t now=millis();
+void drawNoData() {
+  clearNumberArea();
 
-  if(now-lastRead<80)return;
-  lastRead=now;
+  const uint16_t gray =
+    tft.color565(
+      visualBrightness / 3,
+      visualBrightness / 3,
+      visualBrightness / 3
+    );
 
-  const int raw=analogRead(LIGHT_SENSOR_PIN);
+  const int y = tft.height() / 2 - 5;
+  const int dashW = 56;
+  const int gap = 18;
 
-  if(filteredLight==0)filteredLight=raw;
-  filteredLight=filteredLight*0.88f+raw*0.12f;
+  const int x =
+    (tft.width() - (dashW * 2 + gap)) / 2;
 
-  float t=(filteredLight-LIGHT_DARK_RAW)/(float)(LIGHT_BRIGHT_RAW-LIGHT_DARK_RAW);
-  t=constrain(t,0.0f,1.0f);
+  tft.fillRoundRect(x, y, dashW, 10, 4, gray);
+  tft.fillRoundRect(x + dashW + gap, y, dashW, 10, 4, gray);
+}
 
-  // Slight curve keeps night brightness low while still allowing strong daylight output.
-  t=t*t;
+// -----------------------------
+// Turn-signal edge strips
+// -----------------------------
+void drawTurnEdges() {
+  const bool left =
+    digitalRead(LEFT_TURN_PIN) == HIGH;
 
-  visualBrightness=(uint8_t)(
-    MIN_VISUAL_BRIGHTNESS+
-    t*(MAX_VISUAL_BRIGHTNESS-MIN_VISUAL_BRIGHTNESS)
+  const bool right =
+    digitalRead(RIGHT_TURN_PIN) == HIGH;
+
+  const uint16_t green =
+    tft.color565(
+      0,
+      visualBrightness,
+      visualBrightness / 4
+    );
+
+  tft.fillRect(
+    0,
+    0,
+    EDGE_WIDTH,
+    tft.height(),
+    left ? green : ST77XX_BLACK
   );
 
-  if(ENABLE_BACKLIGHT_PWM){
-    analogWrite(BACKLIGHT_PWM_PIN,visualBrightness);
-  }
-
-  Serial.print("Light raw: ");
-  Serial.print(raw);
-  Serial.print("  filtered: ");
-  Serial.print((int)filteredLight);
-  Serial.print("  brightness: ");
-  Serial.println(visualBrightness);
+  tft.fillRect(
+    tft.width() - EDGE_WIDTH,
+    0,
+    EDGE_WIDTH,
+    tft.height(),
+    right ? green : ST77XX_BLACK
+  );
 }
 
-void updateTurnEdges(){
-  const bool left=digitalRead(LEFT_TURN_PIN)==HIGH;
-  const bool right=digitalRead(RIGHT_TURN_PIN)==HIGH;
-  const uint16_t green=dimmedColor(0,255,65);
-
-  // Redraw every cycle when active so ambient-light changes also change edge brightness.
-  if(left){
-    tft.fillRect(0,0,EDGE_WIDTH,tft.height(),green);
-  }else if(lastLeft){
-    tft.fillRect(0,0,EDGE_WIDTH,tft.height(),ST77XX_BLACK);
-  }
-
-  if(right){
-    tft.fillRect(tft.width()-EDGE_WIDTH,0,EDGE_WIDTH,tft.height(),green);
-  }else if(lastRight){
-    tft.fillRect(tft.width()-EDGE_WIDTH,0,EDGE_WIDTH,tft.height(),ST77XX_BLACK);
-  }
-
-  lastLeft=left;
-  lastRight=right;
-}
-
-class ServerCallbacks:public BLEServerCallbacks{
-  void onDisconnect(BLEServer* server) override{
+// -----------------------------
+// BLE input
+// -----------------------------
+class ServerCallbacks : public BLEServerCallbacks {
+  void onDisconnect(BLEServer* server) override {
     BLEDevice::startAdvertising();
   }
 };
 
-class SpeedCallbacks:public BLECharacteristicCallbacks{
-  void onWrite(BLECharacteristic* characteristic) override{
-    String message(characteristic->getValue().c_str());
-    message.trim();
+class DataCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* characteristic) override {
+    String msg(characteristic->getValue().c_str());
 
-    const float mph=message.toFloat();
+    msg.trim();
 
-    if(!isfinite(mph)||mph<0.0f||mph>180.0f)return;
+    const int comma = msg.indexOf(',');
 
-    portENTER_CRITICAL(&speedMux);
-    incomingMph=mph;
-    lastPacketMs=millis();
-    portEXIT_CRITICAL(&speedMux);
+    if (comma < 1) return;
+
+    const float speed =
+      msg.substring(0, comma).toFloat();
+
+    const int limit =
+      msg.substring(comma + 1).toInt();
+
+    if (!isfinite(speed)) return;
+    if (speed < 0.0f || speed > 180.0f) return;
+
+    if (
+      limit != -1 &&
+      (limit < 5 || limit > 90)
+    ) {
+      return;
+    }
+
+    portENTER_CRITICAL(&dataMux);
+
+    currentSpeedMph = speed;
+    currentLimitMph = limit;
+    lastPacketMs = millis();
+
+    portEXIT_CRITICAL(&dataMux);
   }
 };
 
-void setupBle(){
+void setupBle() {
   BLEDevice::init("Custom MPH HUD");
 
-  BLEServer* server=BLEDevice::createServer();
-  server->setCallbacks(new ServerCallbacks());
+  BLEServer* server =
+    BLEDevice::createServer();
 
-  BLEService* service=server->createService(SERVICE_UUID);
-
-  BLECharacteristic* speed=service->createCharacteristic(
-    SPEED_UUID,
-    BLECharacteristic::PROPERTY_WRITE|
-    BLECharacteristic::PROPERTY_WRITE_NR
+  server->setCallbacks(
+    new ServerCallbacks()
   );
 
-  speed->setCallbacks(new SpeedCallbacks());
+  BLEService* service =
+    server->createService(
+      SERVICE_UUID
+    );
+
+  BLECharacteristic* data =
+    service->createCharacteristic(
+      DATA_UUID,
+      BLECharacteristic::PROPERTY_WRITE |
+      BLECharacteristic::PROPERTY_WRITE_NR
+    );
+
+  data->setCallbacks(
+    new DataCallbacks()
+  );
+
   service->start();
 
-  BLEAdvertising* advertising=BLEDevice::getAdvertising();
-  advertising->addServiceUUID(SERVICE_UUID);
+  BLEAdvertising* advertising =
+    BLEDevice::getAdvertising();
+
+  advertising->addServiceUUID(
+    SERVICE_UUID
+  );
+
   advertising->setScanResponse(true);
+
   BLEDevice::startAdvertising();
 }
 
-void setup(){
-  Serial.begin(115200);
+// -----------------------------
+// Startup
+// -----------------------------
+void setup() {
+  pinMode(
+    LEFT_TURN_PIN,
+    INPUT_PULLDOWN
+  );
 
-  pinMode(LEFT_TURN_PIN,INPUT_PULLDOWN);
-  pinMode(RIGHT_TURN_PIN,INPUT_PULLDOWN);
-  pinMode(LIGHT_SENSOR_PIN,INPUT);
-  pinMode(BACKLIGHT_PWM_PIN,OUTPUT);
+  pinMode(
+    RIGHT_TURN_PIN,
+    INPUT_PULLDOWN
+  );
 
-  if(ENABLE_BACKLIGHT_PWM){
-    analogWrite(BACKLIGHT_PWM_PIN,visualBrightness);
-  }else{
-    analogWrite(BACKLIGHT_PWM_PIN,0);
-  }
+  pinMode(
+    LIGHT_SENSOR_PIN,
+    INPUT
+  );
 
-  SPI.begin(TFT_SCLK,-1,TFT_MOSI,TFT_CS);
+  pinMode(
+    BACKLIGHT_PWM_PIN,
+    OUTPUT
+  );
 
-  tft.init(240,320);
+  SPI.begin(
+    TFT_SCLK,
+    -1,
+    TFT_MOSI,
+    TFT_CS
+  );
+
+  tft.init(240, 320);
   tft.setRotation(1);
   tft.fillScreen(ST77XX_BLACK);
 
-  updateAmbientBrightness();
-  drawDisconnected();
-  updateTurnEdges();
+  updateBrightness();
+  drawNoData();
+  drawTurnEdges();
 
   setupBle();
 }
 
-void loop(){
-  updateAmbientBrightness();
-  updateTurnEdges();
+// -----------------------------
+// Main loop
+// -----------------------------
+void loop() {
+  updateBrightness();
+  drawTurnEdges();
 
-  float mph;
+  float speed;
+  int limit;
   uint32_t packetTime;
 
-  portENTER_CRITICAL(&speedMux);
-  mph=incomingMph;
-  packetTime=lastPacketMs;
-  portEXIT_CRITICAL(&speedMux);
+  portENTER_CRITICAL(&dataMux);
 
-  const bool timedOut=packetTime==0||(millis()-packetTime>DATA_TIMEOUT_MS);
+  speed = currentSpeedMph;
+  limit = currentLimitMph;
+  packetTime = lastPacketMs;
 
-  if(timedOut){
-    if(!lastTimedOut){
-      drawDisconnected();
-    }
-    lastTimedOut=true;
-    delay(20);
+  portEXIT_CRITICAL(&dataMux);
+
+  const bool stale =
+    packetTime == 0 ||
+    millis() - packetTime > DATA_TIMEOUT_MS;
+
+  if (stale) {
+    drawNoData();
+    delay(30);
     return;
   }
 
-  lastTimedOut=false;
+  RGB target =
+    targetColor(speed, limit);
 
-  const int rounded=(int)lroundf(mph);
+  const float fade = 0.10f;
 
-  // Redraw continuously so automatic dimming updates even if speed does not change.
-  clearCenter();
-  drawSpeed(rounded);
-  lastSpeed=rounded;
+  shownColor.r +=
+    (target.r - shownColor.r) * fade;
 
-  delay(25);
+  shownColor.g +=
+    (target.g - shownColor.g) * fade;
+
+  shownColor.b +=
+    (target.b - shownColor.b) * fade;
+
+  clearNumberArea();
+
+  drawSpeed(
+    (int)lroundf(speed),
+    hudColor(shownColor)
+  );
+
+  delay(30);
 }

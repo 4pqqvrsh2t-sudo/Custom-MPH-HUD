@@ -1,69 +1,73 @@
 # Custom-MPH-HUD
 
-Fresh start: this project currently does only three things.
+This repository is intentionally minimal.
 
-1. Gets live vehicle speed from the iPhone GPS.
-2. Sends that speed over Bluetooth Low Energy to an ESP32, which draws it on the 2.0-inch ST7789 display.
-3. Shows physical turn signals as thin green strips on the matching screen edge and automatically dims the HUD from an ambient-light sensor.
+The ESP32 is the HUD. Once flashed, it boots and runs by itself every time it receives power. It does not use Wi-Fi and does not load a webpage at runtime.
 
-No speed-limit database or navigation logic is included yet.
+For now the phone sends live driving data to the ESP32 over Bluetooth Low Energy:
 
-## Hardware currently targeted
+`current_speed_mph,speed_limit_mph`
 
-- AITRIP ESP32 ESP-WROOM-32, 30-pin, USB-C.
-- GODIYMODULES 2.0-inch IPS TFT, 240x320, ST7789, SPI, 8 pins:
-  GND, VCC, SCL, SDA, RST, DC, CS, BL.
-- One photoresistor (LDR) plus one 10 kΩ resistor for ambient light.
-- Two safely conditioned turn-signal inputs.
+Example:
 
-## Repository layout
+`47.2,45`
 
-- `firmware/Custom_MPH_HUD.ino` — code that gets flashed onto the ESP32.
-- `index.html`, `app.js`, `styles.css` — the iPhone page that reads GPS speed and sends it to the ESP32.
+The ESP32 handles the display, color logic, turn-signal edge lighting, and ambient-light dimming locally.
 
-## What appears on the HUD
+## Display
 
-The TFT is landscape with a black background. The speed is large and centered. The digits are pre-mirrored so they read normally in the windshield reflection.
+Target display: 2.0-inch 240x320 ST7789 SPI TFT.
 
-When the left turn signal is active, only a thin strip on the left edge turns green. When the right signal is active, only the right edge turns green. Hazards light both edges.
+The screen contains only one large mirrored speed number on a black background.
 
-If the phone stops sending data for 4 seconds, the ESP32 replaces the speed with gray dashes instead of leaving an old speed displayed.
+Color logic:
 
-## Ambient-light dimming
+- 10+ MPH over the speed limit: red
+- 5 to 10 MPH over: fade orange toward red
+- within 5 MPH of the limit: orange
+- 5 MPH under: blue
+- 5 to 10 MPH under: fade blue toward purple
+- 10+ MPH under: purple
+- if no speed limit has been supplied yet: white
 
-The ESP32 reads an LDR on GPIO 34. The firmware always scales the brightness of the speed digits and turn-signal strips using that reading.
+## Turn signals
 
-The firmware also has a PWM output on GPIO 25 for a proper backlight driver. Do not assume the TFT's BL pin can safely be powered directly from an ESP32 GPIO. For first testing, power BL normally. When we add the transistor/MOSFET backlight driver, GPIO 25 will control it automatically.
+- left signal input active: only the left edge lights green
+- right signal input active: only the right edge lights green
+- hazards: both edges light green
 
-## Important vehicle-input rule
+The ESP32 follows the truck's real blinker pulse. It does not generate a fake blink timing.
 
-Do not connect a 12 V turn-signal wire directly to the ESP32.
+GPIO 32 = left turn input
+GPIO 33 = right turn input
 
-GPIO 32 and GPIO 33 must only receive safe 3.3 V logic from an isolation/input-conditioning circuit. We can build that part once the display/GPS side is working.
+Vehicle lighting wiring must be conditioned down to safe 3.3 V logic before reaching the ESP32.
 
-## Flashing the ESP32
+## Ambient light
 
-Use Arduino IDE:
+GPIO 34 reads an LDR/photoresistor voltage divider.
 
-1. Install the ESP32 board package.
-2. Install **Adafruit GFX Library**.
-3. Install **Adafruit ST7735 and ST7789 Library**.
-4. Open `firmware/Custom_MPH_HUD.ino`.
-5. Select an ESP32 Dev Module/ESP32 WROOM board and the correct USB port.
-6. Click Upload.
+The brightness is reduced automatically in darkness and increased in daylight.
 
-The ESP32 will advertise itself as **Custom MPH HUD**.
+GPIO 25 is reserved for the final TFT backlight driver. Do not connect the TFT backlight directly to GPIO 25 until the backlight-current circuit is confirmed.
 
-## iPhone page
+## TFT wiring
 
-The phone page uses the iPhone GPS and Web Bluetooth. Safari on iPhone does not expose Web Bluetooth, so use a browser that does (for example Bluefy) when pairing to the ESP32.
+| TFT | ESP32 |
+| --- | --- |
+| GND | GND |
+| VCC | 3V3 |
+| SCL | GPIO 18 |
+| SDA | GPIO 23 |
+| RST | GPIO 17 |
+| DC | GPIO 16 |
+| CS | GPIO 5 |
+| BL | powered normally until the backlight driver is added |
 
-To host the page, enable GitHub Pages for the repository using the `main` branch and repository root.
+## Firmware
 
-Then:
+The only program that belongs on the ESP32 is:
 
-1. Power the ESP32.
-2. Open the GitHub Pages URL on the iPhone.
-3. Tap **Connect HUD** and select **Custom MPH HUD**.
-4. Tap **Start GPS** and allow precise location.
-5. The phone begins sending MPH to the ESP32.
+`firmware/Custom_MPH_HUD.ino`
+
+No Wi-Fi code is used.
